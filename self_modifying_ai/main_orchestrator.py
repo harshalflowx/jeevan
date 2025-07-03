@@ -5,6 +5,9 @@ import time # For simulating work
 import tempfile # For self-update code generation
 import re # For extracting code from LLM response
 import ast # For basic syntax validation of generated code
+import sys # For sys.executable
+import subprocess # For running pytest
+import asyncio # For asyncio.to_thread if used
 
 # Setup basic logging for the orchestrator
 logger = logging.getLogger(__name__)
@@ -80,6 +83,63 @@ class MainOrchestrator:
 
         self.user_id_for_testing = "test_user_001" # Could be enhanced to get from auth later
         logger.info("Orchestrator initialized successfully.")
+
+    async def _execute_staged_tests(self, staged_test_file_abs_path: str, staging_root_abs_path: str) -> tuple[bool, str]:
+        """
+        Executes pytest on the staged test file.
+        Args:
+            staged_test_file_abs_path: Absolute path to the test file in the staging area.
+            staging_root_abs_path: Absolute path to the root of the staging area (for PYTHONPATH).
+        Returns:
+            A tuple (tests_passed: bool, test_output: str).
+        """
+        logger.info(f"Executing tests for: {staged_test_file_abs_path}")
+        self.command_interface.speak("Running automated tests on the generated code.")
+        print(f"AI: Running automated tests from {staged_test_file_abs_path}...")
+
+        # Prepare environment for subprocess, ensuring pytest can find the staged main code
+        env = os.environ.copy()
+        # Prepend staging_root_abs_path to PYTHONPATH. This allows tests to import modules
+        # from the root of the staging area (e.g., from staging/utils/generated_utils.py)
+        # The AIUpdater stages files like `utils/generated_utils.py` directly under staging_root_abs_path.
+        # So, if test is `from utils.generated_utils import ...`, staging_root_abs_path is the correct root.
+        existing_pythonpath = env.get('PYTHONPATH', '')
+        env['PYTHONPATH'] = f"{staging_root_abs_path}{os.pathsep}{existing_pythonpath}"
+
+        logger.info(f"Using PYTHONPATH for pytest: {env['PYTHONPATH']}")
+
+        cmd = [sys.executable, "-m", "pytest", staged_test_file_abs_path]
+
+        try:
+            # Using asyncio.to_thread to run the blocking subprocess.run in a non-blocking way
+            process = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=60 # Add a timeout for test execution
+            )
+            test_output = f"Pytest STDOUT:\n{process.stdout}\n"
+            if process.stderr:
+                test_output += f"Pytest STDERR:\n{process.stderr}\n"
+
+            logger.info(f"Pytest finished. Return code: {process.returncode}")
+            logger.info(f"Pytest output:\n{test_output}")
+
+            if process.returncode == 0:
+                return True, test_output # All tests passed
+            elif process.returncode == 1: # Pytest specific: tests failed
+                return False, test_output
+            else: # Other errors (e.g., pytest internal error, usage error)
+                return False, f"Pytest execution error (code {process.returncode}).\n{test_output}"
+        except subprocess.TimeoutExpired:
+            logger.error(f"Pytest execution timed out for {staged_test_file_abs_path}")
+            return False, "Pytest execution timed out."
+        except Exception as e:
+            logger.error(f"Error running pytest for {staged_test_file_abs_path}: {e}", exc_info=True)
+            return False, f"An unexpected error occurred while running pytest: {str(e)}"
+
 
     async def process_command(self, command_struct: dict | None):
         """
@@ -266,17 +326,41 @@ class MainOrchestrator:
                 # Ensure BASE_CODE_DIR is correctly pointing to the 'self_modifying_ai' root
                 relative_target_path = os.path.join("utils", "generated_utils.py")
                 # Construct a more detailed prompt for the LLM
+                # Asking for main code and test code separately.
+                # Using markers for easier parsing.
+                main_code_marker = "===BEGIN_MAIN_CODE==="
+                end_main_code_marker = "===END_MAIN_CODE==="
+                test_code_marker = "===BEGIN_TEST_CODE==="
+                end_test_code_marker = "===END_TEST_CODE==="
+
                 llm_prompt = (
-                    f"You are a helpful AI assistant that writes Python code. "
-                    f"I need a Python utility module.\n"
-                    f"The module will be saved as '{relative_target_path}'.\n"
-                    f"The task is: {task_description}.\n"
-                    f"Please generate only the complete Python code for this module. "
-                    f"Do not include any explanations, comments outside the code, or markdown formatting like ```python ... ```. "
-                    f"If the task is to create a function, ensure the file contains only that function and any necessary imports. "
-                    f"For example, if the task is 'create a function greet_user that takes a name and returns a greeting', the output should be:\n"
+                    f"You are a helpful AI assistant that writes Python code and corresponding pytest unit tests.\n"
+                    f"I need a Python utility module and its tests.\n"
+                    f"The main utility code will be saved as '{relative_target_path}'.\n"
+                    f"The task for the main utility code is: {task_description}.\n\n"
+                    f"Generate the complete Python code for this utility module. Place this code between the markers "
+                    f"'{main_code_marker}' and '{end_main_code_marker}'.\n"
+                    f"Do not include any explanations or comments outside the Python code itself for this part.\n"
+                    f"If the task is to create a function, ensure the file contains only that function and any necessary imports.\n\n"
+                    f"After generating the main utility code, generate `pytest` unit tests for it. "
+                    f"The tests should cover typical use cases and edge cases for the described functionality. "
+                    f"Assume the utility module can be imported directly (e.g., `from utils.generated_utils import your_function`).\n"
+                    f"Place these pytest unit tests between the markers '{test_code_marker}' and '{end_test_code_marker}'.\n"
+                    f"Do not include any explanations or comments outside the Python code itself for the test part.\n\n"
+                    f"Example of expected output structure:\n"
+                    f"{main_code_marker}\n"
                     f"def greet_user(name):\n"
                     f"    return f'Hello, {{name}}! Welcome to the AI system.'\n"
+                    f"{end_main_code_marker}\n\n"
+                    f"{test_code_marker}\n"
+                    f"import pytest\n"
+                    f"from utils.generated_utils import greet_user # Adjust import based on actual save path if needed by tests\n\n"
+                    f"def test_greet_user_typical():\n"
+                    f"    assert greet_user('Alice') == 'Hello, Alice! Welcome to the AI system.'\n\n"
+                    f"def test_greet_user_empty_name():\n"
+                    f"    assert greet_user('') == 'Hello, ! Welcome to the AI system.'\n"
+                    f"{end_test_code_marker}\n\n"
+                    f"Ensure the markers are exactly as specified and on their own lines."
                 )
 
                 llm_response = await self.gemini_llm_service.execute("generate_text", {"prompt": llm_prompt})
@@ -291,60 +375,110 @@ class MainOrchestrator:
                         self.feedback_mgr.report_failure(command_id, "Self-update code generation failed.", error_message=error_msg, duration_ms=duration_ms)
                         return
 
-                    # Simple extraction: assume LLM followed instructions and gave raw code.
-                    # More robust extraction might be needed if LLM adds markdown.
-                    code_to_stage = generated_code.strip()
+                    # --- Phase 3: Extract Main Code and Test Code using Markers ---
+                    raw_llm_output = generated_code # Keep original for logging if needed
 
-                    # Check for markdown fences and try to strip them
-                    # ```python\nCODE\n``` or ```\nCODE\n```
-                    markdown_match = re.match(r"^```(?:python)?\s*\n(.*)\n```$", code_to_stage, re.DOTALL | re.IGNORECASE)
-                    if markdown_match:
-                        code_to_stage = markdown_match.group(1).strip()
+                    def extract_code_between_markers(text, start_marker, end_marker):
+                        try:
+                            start_index = text.index(start_marker) + len(start_marker)
+                            end_index = text.index(end_marker, start_index)
+                            return text[start_index:end_index].strip()
+                        except ValueError: # Handles if markers are not found
+                            return None
+
+                    code_to_stage = extract_code_between_markers(raw_llm_output, main_code_marker, end_main_code_marker)
+                    test_code_to_stage = extract_code_between_markers(raw_llm_output, test_code_marker, end_test_code_marker)
 
                     if not code_to_stage:
-                        error_msg = "Extracted code from LLM response is empty after stripping potential markdown."
+                        error_msg = f"Could not extract main code using markers '{main_code_marker}' and '{end_main_code_marker}'. LLM output might not conform to the expected format."
+                        logger.error(f"Command ID {command_id}: {error_msg}. Raw LLM output:\n{raw_llm_output}")
                         print(f"AI Error: {error_msg}")
-                        self.command_interface.speak("LLM response did not contain usable code.")
-                        self.feedback_mgr.report_failure(command_id, "Self-update code generation failed.", error_message=error_msg, duration_ms=duration_ms)
+                        self.command_interface.speak("Failed to extract main code from LLM response.")
+                        self.feedback_mgr.report_failure(command_id, "Self-update code extraction failed.", error_message=error_msg, duration_ms=duration_ms)
                         return
 
-                    print(f"AI: LLM generated the following code:\n---\n{code_to_stage}\n---")
-                    self.command_interface.speak("Code has been generated by the LLM. Performing syntax validation...")
+                    if not test_code_to_stage:
+                        # This could be a warning or an error depending on strictness. For now, make it an error.
+                        error_msg = f"Could not extract test code using markers '{test_code_marker}' and '{end_test_code_marker}'. LLM output might not conform."
+                        logger.error(f"Command ID {command_id}: {error_msg}. Raw LLM output:\n{raw_llm_output}")
+                        print(f"AI Error: {error_msg}")
+                        self.command_interface.speak("Failed to extract test code from LLM response. Main code was extracted but tests are missing.")
+                        # Decide if we proceed without tests or fail. For robust self-update, tests are crucial.
+                        self.feedback_mgr.report_failure(command_id, "Self-update test code extraction failed.", error_message=error_msg, duration_ms=duration_ms)
+                        return # Stop if tests are missing
 
-                    # --- Phase 2: Basic Validation ---
+                    print(f"AI: LLM generated main code:\n---\n{code_to_stage}\n---")
+                    print(f"AI: LLM generated test code:\n---\n{test_code_to_stage}\n---")
+                    self.command_interface.speak("Main code and test code have been generated by the LLM. Performing syntax validation on main code...")
+
+                    # --- Phase 2: Basic Validation (on main code) ---
                     try:
                         ast.parse(code_to_stage)
-                        validation_msg = "Basic syntax validation passed."
+                        validation_msg = "Main code syntax validation passed."
                         print(f"AI: {validation_msg}")
                         self.command_interface.speak(validation_msg)
                     except SyntaxError as e_syntax:
-                        error_msg = f"Generated code failed syntax validation: {e_syntax}"
+                        error_msg = f"Generated main code failed syntax validation: {e_syntax}"
                         logger.error(f"Command ID {command_id}: {error_msg}", exc_info=True)
                         print(f"AI Error: {error_msg}")
-                        self.command_interface.speak("Generated code has syntax errors. Cannot proceed.")
-                        self.feedback_mgr.report_failure(command_id, "Self-update code validation failed.", error_message=str(e_syntax), duration_ms=duration_ms)
-                        return # Stop processing this update
+                        self.command_interface.speak("Generated main code has syntax errors. Cannot proceed.")
+                        self.feedback_mgr.report_failure(command_id, "Self-update main code validation failed.", error_message=str(e_syntax), duration_ms=duration_ms)
+                        return
 
-                    # --- Staging (original logic) ---
+                    # --- Phase 3: Basic Validation (on test code) ---
                     try:
-                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py', prefix='llm_gen_') as tmp_code_file:
-                            tmp_code_file.write(code_to_stage)
-                            temp_file_path = tmp_code_file.name
+                        ast.parse(test_code_to_stage)
+                        validation_msg_tests = "Test code syntax validation passed."
+                        print(f"AI: {validation_msg_tests}")
+                        self.command_interface.speak(validation_msg_tests)
+                    except SyntaxError as e_syntax_tests:
+                        error_msg = f"Generated test code failed syntax validation: {e_syntax_tests}"
+                        logger.error(f"Command ID {command_id}: {error_msg}", exc_info=True)
+                        print(f"AI Error: {error_msg}")
+                        self.command_interface.speak("Generated test code has syntax errors. Cannot proceed with testing.")
+                        self.feedback_mgr.report_failure(command_id, "Self-update test code validation failed.", error_message=str(e_syntax_tests), duration_ms=duration_ms)
+                        return
 
-                        staged_path = self.ai_updater.stage_code_from_source(temp_file_path, relative_target_path)
-                        os.remove(temp_file_path) # Clean up temp file
+                    # --- Staging Main Code and Test Code ---
+                    staged_main_code_path = None
+                    staged_test_code_path = None
+                    relative_test_target_path = os.path.join("tests", "staged_tests", f"test_{os.path.basename(relative_target_path)}")
 
-                        staged_msg = f"Code for task '{task_description[:30]}...' generated, validated, and staged to '{staged_path}'."
-                        print(f"AI: {staged_msg}")
-                        self.command_interface.speak(staged_msg)
-                        # Log intermediate success of staging, actual success is after application
-                        self.history_logger.update_command_status(command_id, "processing_staged", result_summary="Code staged for review.")
+                    try:
+                        # Stage main code
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py', prefix='llm_main_') as tmp_main_code_file:
+                            tmp_main_code_file.write(code_to_stage)
+                            temp_main_code_file_path = tmp_main_code_file.name
+                        staged_main_code_path = self.ai_updater.stage_code_from_source(temp_main_code_file_path, relative_target_path)
+                        os.remove(temp_main_code_file_path)
+                        print(f"AI: Main code staged to '{staged_main_code_path}'.")
 
-                        # --- Phase 2: User Confirmation & Controlled Application ---
+                        # Stage test code
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py', prefix='llm_test_') as tmp_test_code_file:
+                            tmp_test_code_file.write(test_code_to_stage)
+                            temp_test_code_file_path = tmp_test_code_file.name
+                        staged_test_code_path = self.ai_updater.stage_code_from_source(temp_test_code_file_path, relative_test_target_path)
+                        os.remove(temp_test_code_file_path)
+                        print(f"AI: Test code staged to '{staged_test_code_path}'.")
+
+                        staged_all_msg = f"Main code and test code generated, validated, and staged."
+                        self.command_interface.speak(staged_all_msg)
+                        # Log intermediate success of staging, actual success is after application (or testing pass)
+                        self.history_logger.update_command_status(command_id, "processing_staged_for_test", result_summary="Code and tests staged for automated testing.")
+
+                        # --- Phase 3: Automated Test Execution (Next Step in Plan) ---
+                        # For now, we'll skip actual test execution and go to user confirmation
+                        # This part will be filled in the "Implement Test Execution Sub-Process" step.
+                        print("AI: Automated test execution would happen here. (Skipping for now)")
+                        self.command_interface.speak("Automated test execution step is next. For now, skipping to confirmation.")
+
+                        # --- Phase 2: User Confirmation & Controlled Application (existing logic) ---
+                        # This confirmation will eventually be after successful automated tests.
                         confirmation_prompt = (
-                            f"Successfully staged to '{staged_path}'.\n"
-                            f"This will apply the changes to the live file: '{os.path.join(self.ai_updater.base_code_dir, relative_target_path)}'.\n"
-                            f"Do you want to apply this update now?"
+                            f"Main code staged to '{staged_main_code_path}' and test code to '{staged_test_code_path}'.\n"
+                            f"Automated tests are currently skipped. If you proceed, this will apply the main code changes to the live file: "
+                            f"'{os.path.join(self.ai_updater.base_code_dir, relative_target_path)}'.\n"
+                            f"Do you want to apply this update now (without automated testing results)?"
                         )
                         if self.feedback_mgr.request_confirmation(confirmation_prompt):
                             self.command_interface.speak("Applying update as per your confirmation.")

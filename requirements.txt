@@ -2,6 +2,7 @@ aiohttp>=3.8.0
 SpeechRecognition>=3.8.1
 PyAudio>=0.2.11 # Often needed by SpeechRecognition for microphone access
 pyttsx3>=2.90
+pytest>=7.0.0 # For running generated tests
 # Add other dependencies here as needed
 # numpy, pandas, etc. if used by code snippets or future components
 # For Gemini API, if there's a specific client library, add it.
