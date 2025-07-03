@@ -7,9 +7,10 @@ from .base_service_connector import BaseServiceConnector, ServiceCredentials, Au
 
 logger = logging.getLogger(__name__)
 
-# Hypothetical Gemini API endpoint for text generation
-# Replace with actual endpoint if known. This is a placeholder.
-GEMINI_API_ENDPOINT_V1_GENERATE_TEXT = "https_//generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent" # Intentionally broken URL for placeholder
+# Default Gemini API endpoint for text generation if not overridden by environment or constructor.
+# This is a common public endpoint for the gemini-pro model.
+# Users should verify this against official Gemini documentation for the model they intend to use.
+DEFAULT_GEMINI_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
 
 class GeminiServiceConnector(BaseServiceConnector):
     """
@@ -17,16 +18,16 @@ class GeminiServiceConnector(BaseServiceConnector):
     """
     def __init__(self, service_name: str = "GeminiLLMService", api_key: str = None, api_endpoint: str = None):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.api_endpoint = api_endpoint or GEMINI_API_ENDPOINT_V1_GENERATE_TEXT
+        # Allow GEMINI_API_ENDPOINT from .env, then constructor arg, then default
+        self.api_endpoint = os.environ.get("GEMINI_API_ENDPOINT") or api_endpoint or DEFAULT_GEMINI_API_ENDPOINT
 
-        # Pass a ServiceCredentials object to the parent, even if just with the API key
         creds = ServiceCredentials(api_key=self.api_key) if self.api_key else None
         super().__init__(service_name, credentials=creds)
 
         if not self.api_key:
-            logger.warning(f"{self.service_name}: GEMINI_API_KEY is not set. Calls will likely fail authentication.")
-        if self.api_endpoint == GEMINI_API_ENDPOINT_V1_GENERATE_TEXT and "https_" in self.api_endpoint: # Check if it's still the placeholder
-             logger.warning(f"{self.service_name}: API endpoint is using a placeholder URL ({self.api_endpoint}). Please configure a real endpoint.")
+            logger.warning(f"{self.service_name}: GEMINI_API_KEY environment variable is not set. Calls will likely fail authentication.")
+
+        logger.info(f"{self.service_name} initialized. Endpoint: {self.api_endpoint}, API Key Loaded: {bool(self.api_key)}")
 
 
     def _validate_credentials(self):

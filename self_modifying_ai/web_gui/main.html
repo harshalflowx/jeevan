@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Self Modifying AI Interface</title>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- Eel include for Python <-> JavaScript communication -->
+    <script type="text/javascript" src="/eel.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Self-Modifying AI Interface</h1>
+        </header>
+
+        <main>
+            <div id="chatContainer">
+                <div id="chatLog">
+                    <!-- Messages will appear here -->
+                </div>
+                <div id="inputArea">
+                    <input type="text" id="messageInput" placeholder="Type your message or command...">
+                    <button id="sendButton">Send</button>
+                    <button id="voiceInputButton" title="Start Voice Input">🎤</button>
+                </div>
+            </div>
+
+            <div id="activityLogContainer">
+                <h2>Activity Log</h2>
+                <div id="activityLog">
+                    <!-- AI activity updates will appear here -->
+                    <p>AI System Initializing...</p>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>AI Status: <span id="aiStatus">Idle</span></p>
+        </footer>
+    </div>
+
+    <script type="text/javascript" src="js/script.js"></script>
+</body>
+</html>

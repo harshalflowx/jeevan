@@ -3,6 +3,8 @@ SpeechRecognition>=3.8.1
 PyAudio>=0.2.11 # Often needed by SpeechRecognition for microphone access
 pyttsx3>=2.90
 pytest>=7.0.0 # For running generated tests
+python-dotenv>=0.20.0 # For loading .env files
+Eel>=0.16.0 # For creating web-based GUI with Python backend
 # Add other dependencies here as needed
 # numpy, pandas, etc. if used by code snippets or future components
 # For Gemini API, if there's a specific client library, add it.
